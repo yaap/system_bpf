@@ -691,8 +691,7 @@ void vendorBpfLoader() {
         ALOGE("If this triggers randomly, you might be hitting some memory allocation "
               "problems or startup script race.");
         ALOGE("--- DO NOT EXPECT SYSTEM TO BOOT SUCCESSFULLY ---");
-        sleep(20);
-        exit(121);
+        return;
     }
 
     const char* args[] = {"/apex/com.android.tethering/bin/netbpfload", "done", NULL};
