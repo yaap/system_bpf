@@ -19,7 +19,11 @@
 use android_ids::{AID_ROOT, AID_SYSTEM};
 use android_logger::AndroidLogger;
 use anyhow::{anyhow, ensure};
-use libbpf_rs::{set_print, MapCore, ObjectBuilder, PrintLevel};
+use libbpf_rs::{
+    set_print, AsRawLibbpf, MapCore, ObjectBuilder, OpenObject, OpenProgramMut, PrintLevel,
+    ProgramType,
+};
+use libbpf_sys::bpf_program__set_type;
 use libc::{
     mode_t, uname, utsname, S_IRGRP, S_IRUSR, S_IRWXG, S_IRWXO, S_IRWXU, S_ISVTX, S_IWGRP, S_IWUSR,
 };
@@ -152,7 +156,7 @@ struct MapDesc {
 }
 
 impl MapDesc {
-    pub const fn new(name: &'static str, perms: mode_t, group: u32) -> Self {
+    pub const fn new(group: u32, perms: mode_t, name: &'static str) -> Self {
         MapDesc { name, perms, owner: AID_ROOT, group, min_kver: KVER_NONE, max_kver: KVER_INF }
     }
 }
@@ -167,7 +171,7 @@ struct ProgDesc {
 }
 
 impl ProgDesc {
-    pub const fn new(name: &'static str, group: u32) -> Self {
+    pub const fn new(group: u32, name: &'static str) -> Self {
         ProgDesc { name, owner: AID_ROOT, group, min_kver: KVER_NONE, max_kver: KVER_INF }
     }
 }
@@ -190,34 +194,66 @@ const PERM_GRO: mode_t = S_IRUSR | S_IWUSR | S_IRGRP;
 const PERM_GWO: mode_t = S_IRUSR | S_IWUSR | S_IWGRP;
 const PERM_UGR: mode_t = S_IRUSR | S_IRGRP;
 
+const GID_SYSTEM: u32 = AID_SYSTEM;
+
 const FILE_ARR: &[BpfFileDesc] = &[BpfFileDesc {
     filename: "timeInState.bpf",
     dir: "/etc/bpf/",
     prefix: "",
     critical: false,
     maps: &[
-        MapDesc::new("cpu_last_pid_map", PERM_GWO, AID_SYSTEM),
-        MapDesc::new("cpu_last_update_map", PERM_GWO, AID_SYSTEM),
-        MapDesc::new("cpu_policy_map", PERM_GWO, AID_SYSTEM),
-        MapDesc::new("freq_to_idx_map", PERM_GWO, AID_SYSTEM),
-        MapDesc::new("nr_active_map", PERM_GWO, AID_SYSTEM),
-        MapDesc::new("pid_task_aggregation_map", PERM_GWO, AID_SYSTEM),
-        MapDesc::new("pid_time_in_state_map", PERM_GRO, AID_SYSTEM),
-        MapDesc::new("pid_tracked_hash_map", PERM_GWO, AID_SYSTEM),
-        MapDesc::new("pid_tracked_map", PERM_GWO, AID_SYSTEM),
-        MapDesc::new("policy_freq_idx_map", PERM_GWO, AID_SYSTEM),
-        MapDesc::new("policy_nr_active_map", PERM_GWO, AID_SYSTEM),
-        MapDesc::new("total_time_in_state_map", PERM_GRW, AID_SYSTEM),
-        MapDesc::new("uid_concurrent_times_map", PERM_GRW, AID_SYSTEM),
-        MapDesc::new("uid_last_update_map", PERM_GRW, AID_SYSTEM),
-        MapDesc::new("uid_time_in_state_map", PERM_GRW, AID_SYSTEM),
+        MapDesc::new(GID_SYSTEM, PERM_GWO, "cpu_last_pid_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GWO, "cpu_last_update_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GWO, "cpu_policy_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GWO, "freq_to_idx_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GWO, "nr_active_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GWO, "pid_task_aggregation_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GRO, "pid_time_in_state_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GWO, "pid_tracked_hash_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GWO, "pid_tracked_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GWO, "policy_freq_idx_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GWO, "policy_nr_active_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GRW, "total_time_in_state_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_concurrent_times_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_last_update_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_time_in_state_map"),
     ],
     progs: &[
-        ProgDesc::new("tracepoint_power_cpu_frequency", AID_SYSTEM),
-        ProgDesc::new("tracepoint_sched_sched_process_free", AID_SYSTEM),
-        ProgDesc::new("tracepoint_sched_sched_switch", AID_SYSTEM),
+        ProgDesc::new(GID_SYSTEM, "tracepoint_power_cpu_frequency"),
+        ProgDesc::new(GID_SYSTEM, "tracepoint_sched_sched_process_free"),
+        ProgDesc::new(GID_SYSTEM, "tracepoint_sched_sched_switch"),
     ],
 }];
+
+// TODO: Remove this code when fuse-bpf is upstreamed
+fn set_fuse_prog_type(prog: OpenProgramMut) -> Result<(), anyhow::Error> {
+    let path = Path::new("/sys/fs/fuse/bpf_prog_type_fuse");
+    let prog_type_str =
+        fs::read_to_string(path).map_err(|e| anyhow!("Failed to read fuse prog type: {e}"))?;
+    let prog_type = prog_type_str
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| anyhow!("Failed to parse fuse prog type {prog_type_str}: {e}"))?;
+    // SAFETY: If the return value is 0, program type should be updated correctly.
+    // prog.set_prog_type can not be used because ProgramType does not contain BPF_PROG_TYPE_FUSE
+    if unsafe { bpf_program__set_type(prog.as_libbpf_object().as_ptr(), prog_type) } != 0 {
+        return Err(anyhow!("Failed to set fuse prog type {prog_type}"));
+    }
+    Ok(())
+}
+
+fn set_prog_types(open_file: &mut OpenObject) -> Result<(), anyhow::Error> {
+    for mut prog in open_file.progs_mut() {
+        let section_name =
+            prog.section().to_str().ok_or_else(|| anyhow!("Failed to parse prog section name"))?;
+        if section_name.starts_with("skfilter/") {
+            prog.set_prog_type(ProgramType::SocketFilter);
+        } else if section_name.starts_with("fuse/") {
+            set_fuse_prog_type(prog)?;
+        }
+    }
+    Ok(())
+}
 
 fn create_dir(dir_path: &Path) -> Result<(), anyhow::Error> {
     if dir_path.exists() {
@@ -287,7 +323,10 @@ fn libbpf_worker(file_desc: &BpfFileDesc) -> Result<(), anyhow::Error> {
     let filename = filename.to_str().ok_or_else(|| anyhow!("Failed to parse filename"))?;
 
     let mut ob = ObjectBuilder::default();
-    let open_file = ob.open_file(&filepath)?;
+    let mut open_file = ob.open_file(&filepath)?;
+    // libbpf's open_file attempts to infer the prog type based on the section name. But, some
+    // section names are not recognized, so the program type must be set explicitly for them.
+    set_prog_types(&mut open_file)?;
     let mut loaded_file = open_file.load()?;
 
     let bpffs_path = "/sys/fs/bpf/".to_owned() + file_desc.prefix;
