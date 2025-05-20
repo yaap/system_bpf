@@ -16,7 +16,7 @@
 
 //! BPF loader for system and vendor applications
 
-use android_ids::{AID_ROOT, AID_SYSTEM};
+use android_ids::{AID_MEDIA_RW, AID_ROOT, AID_SYSTEM};
 use android_logger::AndroidLogger;
 use anyhow::{anyhow, ensure};
 use libbpf_rs::{
@@ -195,35 +195,46 @@ const PERM_GWO: mode_t = S_IRUSR | S_IWUSR | S_IWGRP;
 const PERM_UGR: mode_t = S_IRUSR | S_IRGRP;
 
 const GID_SYSTEM: u32 = AID_SYSTEM;
+const GID_MEDIA_RW: u32 = AID_MEDIA_RW;
 
-const FILE_ARR: &[BpfFileDesc] = &[BpfFileDesc {
-    filename: "timeInState.bpf",
-    dir: "/etc/bpf/",
-    prefix: "",
-    critical: false,
-    maps: &[
-        MapDesc::new(GID_SYSTEM, PERM_GWO, "cpu_last_pid_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GWO, "cpu_last_update_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GWO, "cpu_policy_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GWO, "freq_to_idx_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GWO, "nr_active_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GWO, "pid_task_aggregation_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GRO, "pid_time_in_state_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GWO, "pid_tracked_hash_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GWO, "pid_tracked_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GWO, "policy_freq_idx_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GWO, "policy_nr_active_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GRW, "total_time_in_state_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_concurrent_times_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_last_update_map"),
-        MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_time_in_state_map"),
-    ],
-    progs: &[
-        ProgDesc::new(GID_SYSTEM, "tracepoint_power_cpu_frequency"),
-        ProgDesc::new(GID_SYSTEM, "tracepoint_sched_sched_process_free"),
-        ProgDesc::new(GID_SYSTEM, "tracepoint_sched_sched_switch"),
-    ],
-}];
+const FILE_ARR: &[BpfFileDesc] = &[
+    BpfFileDesc {
+        filename: "timeInState.bpf",
+        dir: "/etc/bpf/",
+        prefix: "",
+        critical: false,
+        maps: &[
+            MapDesc::new(GID_SYSTEM, PERM_GWO, "cpu_last_pid_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GWO, "cpu_last_update_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GWO, "cpu_policy_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GWO, "freq_to_idx_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GWO, "nr_active_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GWO, "pid_task_aggregation_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GRO, "pid_time_in_state_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GWO, "pid_tracked_hash_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GWO, "pid_tracked_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GWO, "policy_freq_idx_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GWO, "policy_nr_active_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GRW, "total_time_in_state_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_concurrent_times_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_last_update_map"),
+            MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_time_in_state_map"),
+        ],
+        progs: &[
+            ProgDesc::new(GID_SYSTEM, "tracepoint_power_cpu_frequency"),
+            ProgDesc::new(GID_SYSTEM, "tracepoint_sched_sched_process_free"),
+            ProgDesc::new(GID_SYSTEM, "tracepoint_sched_sched_switch"),
+        ],
+    },
+    BpfFileDesc {
+        filename: "fuseMedia.bpf",
+        dir: "/etc/bpf/",
+        prefix: "",
+        critical: false,
+        maps: &[],
+        progs: &[ProgDesc::new(GID_MEDIA_RW, "fuse_media")],
+    },
+];
 
 // TODO: Remove this code when fuse-bpf is upstreamed
 fn set_fuse_prog_type(prog: OpenProgramMut) -> Result<(), anyhow::Error> {
@@ -317,7 +328,11 @@ fn kernel_version() -> Result<u32, anyhow::Error> {
 fn libbpf_worker(file_desc: &BpfFileDesc) -> Result<(), anyhow::Error> {
     info!("Loading {}", file_desc.filename);
     let filepath = Path::new(file_desc.dir).join(file_desc.filename);
-    ensure!(filepath.exists(), "File not found {}", filepath.display());
+    // TODO: Make this error once the BPF loader migration completes.
+    if !filepath.exists() {
+        info!("Skipping load of {} as it does not exist", filepath.display());
+        return Ok(());
+    }
     let filename =
         filepath.file_stem().ok_or_else(|| anyhow!("Failed to parse stem from filename"))?;
     let filename = filename.to_str().ok_or_else(|| anyhow!("Failed to parse filename"))?;
@@ -339,6 +354,10 @@ fn libbpf_worker(file_desc: &BpfFileDesc) -> Result<(), anyhow::Error> {
         let name =
             map.name().to_str().ok_or_else(|| anyhow!("Failed to parse map name into UTF-8"))?;
         let name = String::from(name);
+        if name.ends_with(".rodata") {
+            // Skip pinning map for .rodata section.
+            continue;
+        }
         for map_desc in file_desc.maps {
             if map_desc.name == name {
                 desc_found = true;
