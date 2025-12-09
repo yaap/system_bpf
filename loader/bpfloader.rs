@@ -25,7 +25,8 @@ use libbpf_rs::{
 };
 use libbpf_sys::{bpf_map__autocreate, bpf_program__set_type};
 use libc::{
-    mode_t, uname, utsname, S_IRGRP, S_IRUSR, S_IRWXG, S_IRWXO, S_IRWXU, S_ISVTX, S_IWGRP, S_IWUSR,
+    mode_t, uname, utsname, S_IRGRP, S_IROTH, S_IRUSR, S_IRWXG, S_IRWXO, S_IRWXU, S_ISVTX, S_IWGRP,
+    S_IWOTH, S_IWUSR,
 };
 use log::{debug, error, info, warn, Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
 use rustutils::system_properties;
@@ -142,9 +143,9 @@ fn libbpf_print(level: PrintLevel, mut msg: String) {
         msg.pop();
     }
     match level {
-        PrintLevel::Debug => debug!("{}", msg),
-        PrintLevel::Info => info!("{}", msg),
-        PrintLevel::Warn => warn!("{}", msg),
+        PrintLevel::Debug => debug!("{msg}"),
+        PrintLevel::Info => info!("{msg}"),
+        PrintLevel::Warn => warn!("{msg}"),
     }
 }
 
@@ -175,22 +176,28 @@ struct ProgDesc {
     // Prog is loaded if kernel_version() is >= min_kver and < max_kver
     min_kver: u32,
     max_kver: u32,
+    auto_attach: bool,
 }
 
 impl ProgDesc {
     pub const fn new(group: u32, name: &'static str) -> Self {
-        ProgDesc { name, owner: AID_ROOT, group, min_kver: KVER_NONE, max_kver: KVER_INF }
+        ProgDesc {
+            name,
+            owner: AID_ROOT,
+            group,
+            min_kver: KVER_NONE,
+            max_kver: KVER_INF,
+            auto_attach: false,
+        }
     }
 
     pub const fn new_kver(group: u32, min_kver: u32, name: &'static str) -> Self {
-        ProgDesc { name, owner: AID_ROOT, group, min_kver, max_kver: KVER_INF }
+        ProgDesc { name, owner: AID_ROOT, group, min_kver, max_kver: KVER_INF, auto_attach: false }
     }
 }
 
 struct BpfFileDesc {
     filename: &'static str,
-    // The directory where the BPF file is located.
-    dir: &'static str,
     // Maps and Progs are pinned under /sys/fs/bpf/<prefix>.
     prefix: &'static str,
     // Warning: setting this to 'true' will cause the system to boot loop if there are any issues
@@ -198,6 +205,8 @@ struct BpfFileDesc {
     critical: bool,
     // If this is true, maps and programs in the bpf object file are not loaded.
     skip_on_user: bool,
+    // If this is true, the file is allowed to be missing.
+    allow_missing: bool,
     maps: &'static [MapDesc],
     progs: &'static [ProgDesc],
 }
@@ -206,78 +215,79 @@ const PERM_GRW: mode_t = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
 const PERM_GRO: mode_t = S_IRUSR | S_IWUSR | S_IRGRP;
 const PERM_GWO: mode_t = S_IRUSR | S_IWUSR | S_IWGRP;
 const PERM_UGR: mode_t = S_IRUSR | S_IRGRP;
+const PERM_ORW: mode_t = PERM_GRW | S_IROTH | S_IWOTH;
+const PERM_ORO: mode_t = PERM_GRO | S_IROTH;
+const PERM_OWO: mode_t = PERM_GWO | S_IWOTH;
 
 const GID_ROOT: u32 = AID_ROOT;
 const GID_SYSTEM: u32 = AID_SYSTEM;
 const GID_GRAPHICS: u32 = AID_GRAPHICS;
 const GID_MEDIA_RW: u32 = AID_MEDIA_RW;
 
+const BPF_FILE_DESC_DEFAULT: BpfFileDesc = BpfFileDesc {
+    filename: "",
+    prefix: "",
+    critical: false,
+    skip_on_user: false,
+    allow_missing: false,
+    maps: &[],
+    progs: &[],
+};
+
+// Sections like .rodata, .rodata.str1.1, etc. do not require pinning
+const OPTIONAL_SEC: &[&str] = &[".data", ".kconfig", ".rodata"];
+
 const FILE_ARR: &[BpfFileDesc] = &[
     BpfFileDesc {
-        filename: "timeInState.bpf",
-        dir: "/etc/bpf/",
-        prefix: "",
-        critical: false,
-        skip_on_user: false,
+        filename: "/system/etc/bpf/cputimeinstate/timeInState.bpf",
+        prefix: "cputimeinstate/",
         maps: &[
-            MapDesc::new(GID_SYSTEM, PERM_GWO, "cpu_last_pid_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GWO, "cpu_last_update_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GWO, "cpu_policy_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GWO, "freq_to_idx_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GWO, "nr_active_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GWO, "pid_task_aggregation_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GRO, "pid_time_in_state_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GWO, "pid_tracked_hash_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GWO, "pid_tracked_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GWO, "policy_freq_idx_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GWO, "policy_nr_active_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GRW, "total_time_in_state_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_concurrent_times_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_last_update_map"),
-            MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_time_in_state_map"),
+            MapDesc::new(GID_SYSTEM, PERM_OWO, "cpu_last_pid_map"),
+            MapDesc::new(GID_SYSTEM, PERM_OWO, "cpu_last_update_map"),
+            MapDesc::new(GID_SYSTEM, PERM_OWO, "cpu_policy_map"),
+            MapDesc::new(GID_SYSTEM, PERM_OWO, "freq_to_idx_map"),
+            MapDesc::new(GID_SYSTEM, PERM_OWO, "nr_active_map"),
+            MapDesc::new(GID_SYSTEM, PERM_OWO, "pid_task_aggregation_map"),
+            MapDesc::new(GID_SYSTEM, PERM_ORO, "pid_time_in_state_map"),
+            MapDesc::new(GID_SYSTEM, PERM_OWO, "pid_tracked_hash_map"),
+            MapDesc::new(GID_SYSTEM, PERM_OWO, "pid_tracked_map"),
+            MapDesc::new(GID_SYSTEM, PERM_OWO, "policy_freq_idx_map"),
+            MapDesc::new(GID_SYSTEM, PERM_OWO, "policy_nr_active_map"),
+            MapDesc::new(GID_SYSTEM, PERM_ORW, "total_time_in_state_map"),
+            MapDesc::new(GID_SYSTEM, PERM_ORW, "uid_concurrent_times_map"),
+            MapDesc::new(GID_SYSTEM, PERM_ORW, "uid_last_update_map"),
+            MapDesc::new(GID_SYSTEM, PERM_ORW, "uid_time_in_state_map"),
         ],
         progs: &[
             ProgDesc::new(GID_SYSTEM, "tracepoint_power_cpu_frequency"),
             ProgDesc::new(GID_SYSTEM, "tracepoint_sched_sched_process_free"),
             ProgDesc::new(GID_SYSTEM, "tracepoint_sched_sched_switch"),
         ],
+        ..BPF_FILE_DESC_DEFAULT
     },
     BpfFileDesc {
-        filename: "fuseMedia.bpf",
-        dir: "/etc/bpf/",
-        prefix: "",
-        critical: false,
-        skip_on_user: false,
-        maps: &[],
+        filename: "/system/etc/bpf/fuseMedia.bpf",
         progs: &[ProgDesc::new(GID_MEDIA_RW, "fuse_media")],
+        ..BPF_FILE_DESC_DEFAULT
     },
     BpfFileDesc {
-        filename: "gpuMem.bpf",
-        dir: "/etc/bpf/",
-        prefix: "",
-        critical: false,
-        skip_on_user: false,
+        filename: "/system/etc/bpf/gpuMem.bpf",
         maps: &[MapDesc::new(GID_GRAPHICS, PERM_GRO, "gpu_mem_total_map")],
         progs: &[ProgDesc::new(GID_GRAPHICS, "tracepoint_gpu_mem_gpu_mem_total")],
+        ..BPF_FILE_DESC_DEFAULT
     },
     BpfFileDesc {
-        filename: "gpuWork.bpf",
-        dir: "/etc/bpf/",
-        prefix: "",
-        critical: false,
-        skip_on_user: false,
+        filename: "/system/etc/bpf/gpuWork.bpf",
         maps: &[
             MapDesc::new(GID_GRAPHICS, PERM_GRW, "gpu_work_map"),
             MapDesc::new(GID_GRAPHICS, PERM_GRW, "gpu_work_global_data"),
         ],
         progs: &[ProgDesc::new(GID_GRAPHICS, "tracepoint_power_gpu_work_period")],
+        ..BPF_FILE_DESC_DEFAULT
     },
     BpfFileDesc {
-        filename: "bpfMemEvents.bpf",
-        dir: "/etc/bpf/memevents/",
+        filename: "/system/etc/bpf/memevents/bpfMemEvents.bpf",
         prefix: "memevents/",
-        critical: false,
-        skip_on_user: false,
         maps: &[
             MapDesc::new_kver(GID_SYSTEM, PERM_GRW, KVER_5_10, "ams_rb"),
             MapDesc::new_kver(GID_SYSTEM, PERM_GRW, KVER_5_10, "lmkd_rb"),
@@ -315,12 +325,11 @@ const FILE_ARR: &[BpfFileDesc] = &[
                 "tracepoint_kmem_mm_calculate_totalreserve_pages_lmkd",
             ),
         ],
+        ..BPF_FILE_DESC_DEFAULT
     },
     BpfFileDesc {
-        filename: "bpfMemEventsTest.bpf",
-        dir: "/etc/bpf/memevents/",
+        filename: "/system/etc/bpf/memevents/bpfMemEventsTest.bpf",
         prefix: "memevents/",
-        critical: false,
         skip_on_user: true,
         maps: &[MapDesc::new_kver(GID_SYSTEM, PERM_GRW, KVER_5_10, "rb")],
         progs: &[
@@ -333,24 +342,15 @@ const FILE_ARR: &[BpfFileDesc] = &[
             ProgDesc::new_kver(GID_SYSTEM, KVER_6_1, "skfilter_android_trigger_vendor_lmk_kill"),
             ProgDesc::new_kver(GID_ROOT, KVER_6_1, "skfilter_calculate_totalreserve_pages"),
         ],
+        ..BPF_FILE_DESC_DEFAULT
     },
     BpfFileDesc {
-        filename: "bpfRingbufProg.bpf",
-        dir: "/etc/bpf/",
-        prefix: "",
+        filename: "/system/etc/bpf/bpfRingbufProg.bpf",
         critical: true,
         skip_on_user: true,
         maps: &[MapDesc::new_kver(GID_ROOT, PERM_GRW, KVER_5_10, "test_ringbuf")],
         progs: &[ProgDesc::new_kver(GID_ROOT, KVER_5_10, "skfilter_ringbuf_test")],
-    },
-    BpfFileDesc {
-        filename: "filterPowerSupplyEvents.bpf",
-        dir: "vendor/etc/bpf/",
-        prefix: "vendor/",
-        critical: true,
-        skip_on_user: false,
-        maps: &[],
-        progs: &[ProgDesc::new_kver(GID_SYSTEM, KVER_5_10, "skfilter_power_supply")],
+        ..BPF_FILE_DESC_DEFAULT
     },
 ];
 
@@ -500,18 +500,21 @@ fn libbpf_worker(file_desc: &BpfFileDesc) -> Result<(), anyhow::Error> {
         info!("Skip loading {} on user build", file_desc.filename);
         return Ok(());
     }
-    let filepath = Path::new(file_desc.dir).join(file_desc.filename);
-    // TODO: Make this error once the BPF loader migration completes.
+    let filepath = Path::new(file_desc.filename);
     if !filepath.exists() {
-        info!("Skipping load of {} as it does not exist", filepath.display());
-        return Ok(());
+        if file_desc.allow_missing {
+            info!("Skipping load of {} as it does not exist", filepath.display());
+            return Ok(());
+        } else {
+            return Err(anyhow!("File {} does not exist", filepath.display()));
+        }
     }
     let filename =
         filepath.file_stem().ok_or_else(|| anyhow!("Failed to parse stem from filename"))?;
     let filename = filename.to_str().ok_or_else(|| anyhow!("Failed to parse filename"))?;
 
     let mut ob = ObjectBuilder::default();
-    let mut open_file = ob.open_file(&filepath)?;
+    let mut open_file = ob.open_file(filepath)?;
     // libbpf's open_file attempts to infer the prog type based on the section name. But, some
     // section names are not recognized, so the program type must be set explicitly for them.
     set_prog_types(&mut open_file)?;
@@ -526,10 +529,6 @@ fn libbpf_worker(file_desc: &BpfFileDesc) -> Result<(), anyhow::Error> {
         let name =
             map.name().to_str().ok_or_else(|| anyhow!("Failed to parse map name into UTF-8"))?;
         let name = String::from(name);
-        if name.ends_with(".rodata") {
-            // Skip pinning map for .rodata section.
-            continue;
-        }
         for map_desc in file_desc.maps {
             if map_desc.name == name {
                 desc_found = true;
@@ -541,7 +540,12 @@ fn libbpf_worker(file_desc: &BpfFileDesc) -> Result<(), anyhow::Error> {
                 }
 
                 let pinpath_str = bpffs_path.clone() + "map_" + filename + "_" + &name;
-                let pinpath = Path::new(&pinpath_str);
+
+                // bpffs disallows periods in path names, so replace them with underscores
+                // to align with libbpf's sanitize_pin_path() behavior.
+                let pinpath_sanitized_str = pinpath_str.replace('.', "_");
+
+                let pinpath = Path::new(&pinpath_sanitized_str);
                 debug!("Pinning: {}", pinpath.display());
                 map.pin(pinpath).map_err(|e| anyhow!("Failed to pin map {name}: {e}"))?;
                 fs::set_permissions(pinpath, Permissions::from_mode(map_desc.perms as _)).map_err(
@@ -564,7 +568,12 @@ fn libbpf_worker(file_desc: &BpfFileDesc) -> Result<(), anyhow::Error> {
                 break;
             }
         }
-        ensure!(desc_found, "Descriptor for {name} not found!");
+        if !desc_found && OPTIONAL_SEC.iter().any(|&section| name.contains(section)) {
+            info!("Optional map descriptor for {name} not found, ignoring");
+            continue;
+        }
+
+        ensure!(desc_found, "Map descriptor for {name} not found!");
     }
 
     for mut prog in loaded_file.progs_mut() {
@@ -580,9 +589,30 @@ fn libbpf_worker(file_desc: &BpfFileDesc) -> Result<(), anyhow::Error> {
                     continue;
                 }
                 let pinpath_str = bpffs_path.clone() + "prog_" + filename + "_" + &name;
-                let pinpath = Path::new(&pinpath_str);
-                debug!("Pinning: {}", pinpath.display());
-                prog.pin(pinpath).map_err(|e| anyhow!("Failed to pin prog {name}: {e}"))?;
+
+                // bpffs disallows periods in path names, so replace them with underscores
+                // to align with libbpf's sanitize_pin_path() behavior.
+                let pinpath_sanitized_str = pinpath_str.replace('.', "_");
+
+                let pinpath = Path::new(&pinpath_sanitized_str);
+                if prog_desc.auto_attach {
+                    debug!("Auto-attaching program: {}", name);
+                    let mut link =
+                        prog.attach().map_err(|e| anyhow!("Failed to attach prog {name}: {e}"))?;
+                    debug!("Pinning link for {}: {}", name, pinpath.display());
+                    link.pin(pinpath).map_err(|e| anyhow!("Failed to pin link for {name}: {e}"))?;
+                    info!("Successfully attached and pinned program {}", name);
+                    // The Link object's destructor calls bpf_link__destroy(), which
+                    // would normally detach the program when the object goes out of scope.
+                    // By calling disconnect() here, we modify the link so that the
+                    // subsequent bpf_link__destroy() call does not detach the BPF
+                    // resource. This, combined with pinning, ensures the attachment
+                    // persists after the bpfloader process exits.
+                    link.disconnect();
+                } else {
+                    debug!("Pinning program {}: {}", name, pinpath.display());
+                    prog.pin(pinpath).map_err(|e| anyhow!("Failed to pin prog {name}: {e}"))?;
+                }
                 fs::set_permissions(pinpath, Permissions::from_mode(PERM_UGR as _)).map_err(
                     |e| {
                         anyhow!(
@@ -602,7 +632,7 @@ fn libbpf_worker(file_desc: &BpfFileDesc) -> Result<(), anyhow::Error> {
                 break;
             }
         }
-        ensure!(desc_found, "Descriptor for {name} not found!");
+        ensure!(desc_found, "Prog descriptor for {name} not found!");
     }
     Ok(())
 }
@@ -626,12 +656,12 @@ fn main() {
     let kmsg_file = unsafe { File::from_raw_fd(kmsg_fd) };
 
     if let Err(logger) = BpfKmsgLogger::init(kmsg_file) {
-        error!("BpfLoader-rs: log::setlogger failed: {}", logger);
+        error!("BpfLoader-rs: log::setlogger failed: {logger}");
     }
 
     // Redirect panic messages to both logcat and serial port
     panic::set_hook(Box::new(|panic_info| {
-        error!("{}", panic_info);
+        error!("{panic_info}");
     }));
 
     // Enable logging from libbpf
@@ -640,14 +670,15 @@ fn main() {
     load_libbpf_progs();
     info!("Loading legacy BPF progs");
 
-    // SAFETY: Linking in the existing legacy bpfloader functionality.
-    // Any of the four following bindgen functions can abort() or exit()
-    // on failure and execNetBpfLoadDone() execve()'s.
+    if let Err(e) = create_dir(Path::new("/sys/fs/bpf/vendor")) {
+        panic!("Error during mkdir /sys/fs/bpf/vendor: {e}");
+    };
+
+    // SAFETY: Linking in the existing legacy vendor bpfloader functionality.
+    // The following bindgen function can abort() or exit() on failure,
+    // but will usually execve().
     unsafe {
-        bpf_android_bindgen::initLogging();
-        bpf_android_bindgen::createBpfFsSubDirectories();
-        bpf_android_bindgen::legacyBpfLoader();
-        bpf_android_bindgen::execNetBpfLoadDone();
+        bpf_android_bindgen::vendorBpfLoader();
     }
 }
 
