@@ -19,6 +19,6 @@
 
 // The C++ portion of the BpfLoader is exposed as a terminal function.
 #ifdef __cplusplus
-extern "C" __noreturn
+extern "C" 
 #endif
 void vendorBpfLoader();
