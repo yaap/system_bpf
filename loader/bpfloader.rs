@@ -29,7 +29,7 @@ use libc::{
     S_IWOTH, S_IWUSR,
 };
 use log::{debug, error, info, warn, Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
-use rustutils::system_properties;
+use rustutils::android::system_properties;
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use std::{
@@ -49,9 +49,8 @@ const fn kver(a: u32, b: u32, c: u32) -> u32 {
 }
 
 const KVER_NONE: u32 = kver(0, 0, 0);
-const KVER_INF: u32 = 0xFFFFFFFF;
-const KVER_5_10: u32 = kver(5, 10, 0);
 const KVER_6_1: u32 = kver(6, 1, 0);
+const KVER_INF: u32 = 0xFFFFFFFF;
 
 enum KernelLevel {
     // Commented out unused due to rust complaining...
@@ -196,6 +195,7 @@ impl ProgDesc {
     }
 }
 
+#[derive(Clone)]
 struct BpfFileDesc {
     filename: &'static str,
     // Maps and Progs are pinned under /sys/fs/bpf/<prefix>.
@@ -289,31 +289,15 @@ const FILE_ARR: &[BpfFileDesc] = &[
         filename: "/system/etc/bpf/memevents/bpfMemEvents.bpf",
         prefix: "memevents/",
         maps: &[
-            MapDesc::new_kver(GID_SYSTEM, PERM_GRW, KVER_5_10, "ams_rb"),
-            MapDesc::new_kver(GID_SYSTEM, PERM_GRW, KVER_5_10, "lmkd_rb"),
+            MapDesc::new(GID_SYSTEM, PERM_GRW, "ams_rb"),
+            MapDesc::new(GID_SYSTEM, PERM_GRW, "lmkd_rb"),
         ],
         progs: &[
-            ProgDesc::new_kver(GID_SYSTEM, KVER_5_10, "tracepoint_oom_mark_victim_ams"),
-            ProgDesc::new_kver(
-                GID_SYSTEM,
-                KVER_5_10,
-                "tracepoint_vmscan_mm_vmscan_direct_reclaim_begin_lmkd",
-            ),
-            ProgDesc::new_kver(
-                GID_SYSTEM,
-                KVER_5_10,
-                "tracepoint_vmscan_mm_vmscan_direct_reclaim_end_lmkd",
-            ),
-            ProgDesc::new_kver(
-                GID_SYSTEM,
-                KVER_5_10,
-                "tracepoint_vmscan_mm_vmscan_kswapd_wake_lmkd",
-            ),
-            ProgDesc::new_kver(
-                GID_SYSTEM,
-                KVER_5_10,
-                "tracepoint_vmscan_mm_vmscan_kswapd_sleep_lmkd",
-            ),
+            ProgDesc::new(GID_SYSTEM, "tracepoint_oom_mark_victim_ams"),
+            ProgDesc::new(GID_SYSTEM, "tracepoint_vmscan_mm_vmscan_direct_reclaim_begin_lmkd"),
+            ProgDesc::new(GID_SYSTEM, "tracepoint_vmscan_mm_vmscan_direct_reclaim_end_lmkd"),
+            ProgDesc::new(GID_SYSTEM, "tracepoint_vmscan_mm_vmscan_kswapd_wake_lmkd"),
+            ProgDesc::new(GID_SYSTEM, "tracepoint_vmscan_mm_vmscan_kswapd_sleep_lmkd"),
             ProgDesc::new_kver(
                 GID_SYSTEM,
                 KVER_6_1,
@@ -331,14 +315,14 @@ const FILE_ARR: &[BpfFileDesc] = &[
         filename: "/system/etc/bpf/memevents/bpfMemEventsTest.bpf",
         prefix: "memevents/",
         skip_on_user: true,
-        maps: &[MapDesc::new_kver(GID_SYSTEM, PERM_GRW, KVER_5_10, "rb")],
+        maps: &[MapDesc::new(GID_SYSTEM, PERM_GRW, "rb")],
         progs: &[
-            ProgDesc::new_kver(GID_SYSTEM, KVER_5_10, "tracepoint_oom_mark_victim"),
-            ProgDesc::new_kver(GID_ROOT, KVER_5_10, "skfilter_oom_kill"),
-            ProgDesc::new_kver(GID_ROOT, KVER_5_10, "skfilter_direct_reclaim_begin"),
-            ProgDesc::new_kver(GID_ROOT, KVER_5_10, "skfilter_direct_reclaim_end"),
-            ProgDesc::new_kver(GID_ROOT, KVER_5_10, "skfilter_kswapd_wake"),
-            ProgDesc::new_kver(GID_ROOT, KVER_5_10, "skfilter_kswapd_sleep"),
+            ProgDesc::new(GID_SYSTEM, "tracepoint_oom_mark_victim"),
+            ProgDesc::new(GID_ROOT, "skfilter_oom_kill"),
+            ProgDesc::new(GID_ROOT, "skfilter_direct_reclaim_begin"),
+            ProgDesc::new(GID_ROOT, "skfilter_direct_reclaim_end"),
+            ProgDesc::new(GID_ROOT, "skfilter_kswapd_wake"),
+            ProgDesc::new(GID_ROOT, "skfilter_kswapd_sleep"),
             ProgDesc::new_kver(GID_SYSTEM, KVER_6_1, "skfilter_android_trigger_vendor_lmk_kill"),
             ProgDesc::new_kver(GID_ROOT, KVER_6_1, "skfilter_calculate_totalreserve_pages"),
         ],
@@ -348,11 +332,87 @@ const FILE_ARR: &[BpfFileDesc] = &[
         filename: "/system/etc/bpf/bpfRingbufProg.bpf",
         critical: true,
         skip_on_user: true,
-        maps: &[MapDesc::new_kver(GID_ROOT, PERM_GRW, KVER_5_10, "test_ringbuf")],
-        progs: &[ProgDesc::new_kver(GID_ROOT, KVER_5_10, "skfilter_ringbuf_test")],
+        maps: &[MapDesc::new(GID_ROOT, PERM_GRW, "test_ringbuf")],
+        progs: &[ProgDesc::new(GID_ROOT, "skfilter_ringbuf_test")],
         ..BPF_FILE_DESC_DEFAULT
     },
 ];
+
+#[cfg(target_arch = "x86_64")]
+const CYCLE_PER_UID_FILE: BpfFileDesc = BpfFileDesc {
+    filename: "/system/etc/bpf/cpucycleperuid/cyclePerUid.bpf",
+    prefix: "cpucycleperuid/",
+    critical: false,
+    skip_on_user: false,
+    maps: &[
+        MapDesc::new(GID_SYSTEM, PERM_GRW, "last_recorded_cycle_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GRW, "last_running_pid_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GRW, "uid_cpu_cycle_map"),
+        MapDesc::new(GID_SYSTEM, PERM_GRW, "tsc_events"),
+        MapDesc::new(GID_SYSTEM, PERM_GRW, "desync_counter"),
+    ],
+    progs: &[ProgDesc::new(GID_SYSTEM, "tp_sched_switch")],
+    ..BPF_FILE_DESC_DEFAULT
+};
+
+const KERNEL_WAKELOCK_DURATION_FILE: BpfFileDesc = BpfFileDesc {
+    filename: "/system/etc/bpf/kernelWakelockDuration.bpf",
+    prefix: "kernelwakelockduration/",
+    maps: &[MapDesc::new(GID_SYSTEM, PERM_GRO, "program_state")],
+    progs: &[
+        ProgDesc {
+            auto_attach: true,
+            ..ProgDesc::new(GID_SYSTEM, "tracepoint_power_wakeup_source_activate")
+        },
+        ProgDesc {
+            auto_attach: true,
+            ..ProgDesc::new(GID_SYSTEM, "tracepoint_power_wakeup_source_deactivate")
+        },
+    ],
+    ..BPF_FILE_DESC_DEFAULT
+};
+
+const KERNEL_WAKELOCK_DURATION_TEST_FILE: BpfFileDesc = BpfFileDesc {
+    filename: "system/etc/bpf/kernelWakelockDurationTest.bpf",
+    prefix: "kernelwakelockduration/",
+    skip_on_user: true,
+    maps: &[MapDesc::new(GID_SYSTEM, PERM_GRO, "program_state")],
+    progs: &[
+        ProgDesc::new(GID_SYSTEM, "tracepoint_power_wakeup_source_activate"),
+        ProgDesc::new(GID_SYSTEM, "tracepoint_power_wakeup_source_deactivate"),
+    ],
+    ..BPF_FILE_DESC_DEFAULT
+};
+
+const DMABUF_ITERATOR_FILE: BpfFileDesc = BpfFileDesc {
+    filename: "/system/etc/bpf/dmabuf/dmabufIter.bpf",
+    prefix: "dmabuf/",
+    progs: &[ProgDesc { auto_attach: true, ..ProgDesc::new(GID_SYSTEM, "iter_dmabuf") }],
+    ..BPF_FILE_DESC_DEFAULT
+};
+
+const LOCK_CONTENTION_FILE: BpfFileDesc = BpfFileDesc {
+    filename: "/system/etc/bpf/lock_contention/bpfLockContention.bpf",
+    prefix: "lock_contention/",
+    maps: &[
+        // Readonly - This is used as a temporary store for calculating latencies,
+        // userspace doesn't need to write here.
+        MapDesc::new_kver(GID_SYSTEM, PERM_GRO, KVER_6_1, "contention_start_map"),
+        // Needs write permission to be cleared by userspace.
+        MapDesc::new_kver(GID_SYSTEM, PERM_GRW, KVER_6_1, "contention_latency_map"),
+    ],
+    progs: &[
+        ProgDesc {
+            auto_attach: true,
+            ..ProgDesc::new_kver(GID_SYSTEM, KVER_6_1, "tracepoint_lock_contention_begin")
+        },
+        ProgDesc {
+            auto_attach: true,
+            ..ProgDesc::new_kver(GID_SYSTEM, KVER_6_1, "tracepoint_lock_contention_end")
+        },
+    ],
+    ..BPF_FILE_DESC_DEFAULT
+};
 
 // TODO: Remove this code when fuse-bpf is upstreamed
 fn set_fuse_prog_type(prog: OpenProgramMut) -> Result<(), anyhow::Error> {
@@ -641,10 +701,37 @@ fn libbpf_worker(file_desc: &BpfFileDesc) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+fn get_file_vec() -> Vec<BpfFileDesc> {
+    let mut file_vec = FILE_ARR.to_vec();
+
+    if android_bpfprogs_flags::kernel_wakelock_duration() {
+        file_vec.push(KERNEL_WAKELOCK_DURATION_FILE);
+        file_vec.push(KERNEL_WAKELOCK_DURATION_TEST_FILE);
+    }
+
+    if android_bpfprogs_flags::load_dmabuf_iterator() {
+        file_vec.push(DMABUF_ITERATOR_FILE);
+    }
+
+    if android_bpfprogs_flags::load_bpf_lock_contention() {
+        file_vec.push(LOCK_CONTENTION_FILE);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    if backstage_power_flags::x86_cpu_energy_attribution() {
+        file_vec.push(CYCLE_PER_UID_FILE);
+    }
+
+    file_vec
+}
+
 fn load_libbpf_progs() {
     info!("Loading libbpf programs");
-    for file_desc in FILE_ARR {
-        if let Err(e) = libbpf_worker(file_desc) {
+
+    let file_vec = get_file_vec();
+
+    for file_desc in file_vec {
+        if let Err(e) = libbpf_worker(&file_desc) {
             if file_desc.critical {
                 error!("'critical' Error when loading {0}: {e}\n", file_desc.filename);
             } else {

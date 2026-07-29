@@ -83,6 +83,8 @@ rust_defaults {
     ],
     rustlibs: [
         "libbpf_android_bindgen",
+        "libandroid_bpfprogs_flags",
+        "libbackstage_power_flags_rust",
         "libandroid_ids",
         "libandroid_logger",
         "libanyhow",
@@ -104,13 +106,24 @@ rust_binary {
     name: "bpfloader",
     defaults: ["bpfloader_defaults"],
     required: [
-        "bpftool",
+        "kernelWakelockDuration.bpf",
         "timeInState.bpf",
+        "dmabufIter.bpf",
+        "bpfLockContention.bpf",
     ],
+    arch: {
+        x86_64: {
+            required: [
+                "cyclePerUid.bpf",
+            ],
+        },
+    },
     product_variables: {
         debuggable: {
             required: [
+                "bpftool",
                 "bpfRingbufProg.bpf",
+                "kernelWakelockDurationTest.bpf",
             ],
         },
     },

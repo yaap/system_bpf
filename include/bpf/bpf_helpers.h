@@ -6,87 +6,9 @@
 
 #include "bpf_map_def.h"
 
-/******************************************************************************
- * WARNING: CHANGES TO THIS FILE OUTSIDE OF AOSP/MAIN ARE LIKELY TO BREAK     *
- * DEVICE COMPATIBILITY WITH MAINLINE MODULES SHIPPING EBPF CODE.             *
- *                                                                            *
- * THIS WILL LIKELY RESULT IN BRICKED DEVICES AT SOME ARBITRARY FUTURE TIME   *
- *                                                                            *
- * THAT GOES ESPECIALLY FOR THE 'SECTION' 'LICENSE' AND 'CRITICAL' MACROS     *
- *                                                                            *
- * We strongly suggest that if you need changes to bpfloader functionality    *
- * you get your changes reviewed and accepted into aosp/master.               *
- *                                                                            *
- ******************************************************************************/
-
-// The actual versions of the bpfloader that shipped in various Android releases
-
-// Android P/Q/R: BpfLoader was initially part of netd,
-// this was later split out into a standalone binary, but was unversioned.
-
-// Android S / 12 (api level 31) - added 'tethering' mainline eBPF support
-#define BPFLOADER_S_VERSION 2u
-
-// Android T / 13 (api level 33) - support for shared/selinux_context/pindir
-#define BPFLOADER_T_VERSION 19u
-
-// BpfLoader v0.25+ support obj@ver.o files
-#define BPFLOADER_OBJ_AT_VER_VERSION 25u
-
-// Bpfloader v0.33+ supports {map,prog}.ignore_on_{eng,user,userdebug}
-#define BPFLOADER_IGNORED_ON_VERSION 33u
-
-// Android U / 14 (api level 34) - various new program types added
-#define BPFLOADER_U_VERSION 38u
-
-// Android U QPR2 / 14 (api level 34) - platform only
-// (note: the platform bpfloader in V isn't really versioned at all,
-//  as there is no need as it can only load objects compiled at the
-//  same time as itself and the rest of the platform)
-#define BPFLOADER_U_QPR2_VERSION 41u
-#define BPFLOADER_PLATFORM_VERSION BPFLOADER_U_QPR2_VERSION
-
-// Android Mainline BpfLoader when running on Android S (sdk=31)
-// Note: this value (and the following +1u's) are hardcoded in NetBpfLoad.cpp
-#define BPFLOADER_MAINLINE_S_VERSION 42u
-
-// Android Mainline BpfLoader when running on Android T (sdk=33)
-#define BPFLOADER_MAINLINE_T_VERSION (BPFLOADER_MAINLINE_S_VERSION + 1u)
-
-// Android Mainline BpfLoader when running on Android U (sdk=34)
-#define BPFLOADER_MAINLINE_U_VERSION (BPFLOADER_MAINLINE_T_VERSION + 1u)
-
-// Android Mainline BpfLoader when running on Android U QPR3
-#define BPFLOADER_MAINLINE_U_QPR3_VERSION (BPFLOADER_MAINLINE_U_VERSION + 1u)
-
-// Android Mainline BpfLoader when running on Android V (sdk=35)
-#define BPFLOADER_MAINLINE_V_VERSION (BPFLOADER_MAINLINE_U_QPR3_VERSION + 1u)
-
-// Android Mainline BpfLoader when running on Android 25Q2 (sdk=36 aka 36.0)
-#define BPFLOADER_MAINLINE_25Q2_VERSION (BPFLOADER_MAINLINE_V_VERSION + 1u)
-
-// Android Mainline BpfLoader when running on Android 25Q3 (sdk 36.0+)
-#define BPFLOADER_MAINLINE_25Q3_VERSION (BPFLOADER_MAINLINE_25Q2_VERSION + 1u)
-
-// Android Mainline BpfLoader when running on Android 25Q4 (sdk 36.1)
-#define BPFLOADER_MAINLINE_25Q4_VERSION (BPFLOADER_MAINLINE_25Q3_VERSION + 1u)
-
-// Android Mainline BpfLoader when running on Android 26Q1 (sdk 36.1+)
-#define BPFLOADER_MAINLINE_26Q1_VERSION (BPFLOADER_MAINLINE_25Q4_VERSION + 1u)
-
-// Android Mainline BpfLoader when running on Android 26Q2 (sdk 37.0)
-#define BPFLOADER_MAINLINE_26Q2_VERSION (BPFLOADER_MAINLINE_26Q1_VERSION + 1u)
-
-/* For mainline module use, you can #define BPFLOADER_{MIN/MAX}_VER
- * before #include "bpf_helpers.h" to change which bpfloaders will
- * process the resulting .o file.
- *
- * While this will work outside of mainline too, there just is no point to
- * using it when the .o and the bpfloader ship in sync with each other.
- * In which case it's just best to use the default.
- */
+// Deprecated: 41u is the platform bpfloader version for historical reasons.
 #ifndef BPFLOADER_MIN_VER
-#define BPFLOADER_MIN_VER BPFLOADER_PLATFORM_VERSION  // inclusive, ie. >=
+#define BPFLOADER_MIN_VER 41u  // inclusive, ie. >=
 #endif
 
 #ifndef BPFLOADER_MAX_VER
@@ -124,7 +46,7 @@
     unsigned int _bpfloader_max_ver SECTION("bpfloader_max_ver") = BPFLOADER_MAX_VER;              \
     size_t _size_of_bpf_map_def SECTION("size_of_bpf_map_def") = sizeof(struct bpf_map_def);       \
     size_t _size_of_bpf_prog_def SECTION("size_of_bpf_prog_def") = sizeof(struct bpf_prog_def);    \
-    unsigned _btf_min_bpfloader_ver SECTION("btf_min_bpfloader_ver") = BPFLOADER_MAINLINE_S_VERSION; \
+    unsigned _btf_min_bpfloader_ver SECTION("btf_min_bpfloader_ver") = 42u;                        \
     unsigned _btf_user_min_bpfloader_ver SECTION("btf_user_min_bpfloader_ver") = 0xFFFFFFFFu;      \
     char _license[] SECTION("license") = (NAME)
 
@@ -140,11 +62,6 @@ struct kver_uint { unsigned int kver; };
 #define KVER_(v) ((struct kver_uint){ .kver = (v) })
 #define KVER(a, b, c) KVER_(((a) << 24) + ((b) << 16) + (c))
 #define KVER_NONE KVER_(0)
-#define KVER_4_9  KVER(4, 9, 0)
-#define KVER_4_14 KVER(4, 14, 0)
-#define KVER_4_19 KVER(4, 19, 0)
-#define KVER_5_4  KVER(5, 4, 0)
-#define KVER_5_10 KVER(5, 10, 0)
 #define KVER_5_15 KVER(5, 15, 0)
 #define KVER_6_1  KVER(6, 1, 0)
 #define KVER_6_6  KVER(6, 6, 0)
@@ -152,50 +69,6 @@ struct kver_uint { unsigned int kver; };
 #define KVER_INF KVER_(0xFFFFFFFFu)
 
 #define KVER_IS_AT_LEAST(kver, a, b, c) ((kver).kver >= KVER(a, b, c).kver)
-
-// Helpers for writing sdk level specific bpf programs
-//
-// Note: we choose to follow 'ro.build.version.sdk_full'
-// (or just 'sdk' if 'sdk_full' is not available) values,
-// multiplied by 100, with 1 added per QPR.
-// This will (eventually) match our bpfloader versioning scheme.
-//
-// This is just for ease of use, really these are only
-// ever compared to each other, so they only need to be
-// monotonically increasing.
-//
-// For now this easily suffices for our use case.
-//
-// Note: 24Q1 is the first trunk stable release,
-// and thus where quarters start possibly mattering.
-//
-// We leave most of these as commented out documentation,
-// as it's probably a bad idea to actually use them.
-
-struct sdk_level_uint { unsigned int sdk_level; };
-#define SDK_LEVEL_(v) ((struct sdk_level_uint){ .sdk_level = (v) })
-//      SDK_LEVEL_NONE   SDK_LEVEL_(0)    // mainline implies S+
-#define SDK_LEVEL_S      SDK_LEVEL_(3100) // Android 12     [31]
-//      SDK_LEVEL_Sv2    SDK_LEVEL_(3200) // Android 12L    [32]
-#define SDK_LEVEL_T      SDK_LEVEL_(3300) // Android 13     [33]
-#define SDK_LEVEL_U      SDK_LEVEL_(3400) // Android 14/U   [34]
-//      SDK_LEVEL_U_QPR1 SDK_LEVEL_(3401) // Android 14/U QPR1
-//      SDK_LEVEL_24Q1   SDK_LEVEL_(3402) // Android 14/U QPR2
-//      SDK_LEVEL_24Q2   SDK_LEVEL_(3403) // Android 14/U QPR3
-#define SDK_LEVEL_24Q3   SDK_LEVEL_(3500) // Android 15/V   [35]
-//      SDK_LEVEL_24Q4   SDK_LEVEL_(3501) // Android 15/V QPR1
-//      SDK_LEVEL_25Q1   SDK_LEVEL_(3502) // Android 15/V QPR2
-#define SDK_LEVEL_25Q2   SDK_LEVEL_(3600) // Android 16 (B) [36.0]
-//      SDK_LEVEL_25Q3   SDK_LEVEL_(3601) // Android 16 QPR
-#define SDK_LEVEL_25Q4   SDK_LEVEL_(3610) // Android 16.1   [36.1]
-//      SDK_LEVEL_26Q1   SDK_LEVEL_(3611) // Android 16.1 QPR
-#define SDK_LEVEL_26Q2   SDK_LEVEL_(3700) // Android 17 (C) [37.0]
-//      SDK_LEVEL_26Q3   SDK_LEVEL_(3701) // Android 17 QPR
-#define SDK_LEVEL_26Q4   SDK_LEVEL_(3710) // Android 17.1   [37.1]
-//      SDK_LEVEL_27Q1   SDK_LEVEL_(3711) // Android 17.1 QPR
-#define SDK_LEVEL_27Q2   SDK_LEVEL_(3800) // Android 18     [38.0]
-
-#define SDK_LEVEL_IS_AT_LEAST(lvl, v) ((lvl).sdk_level >= (SDK_LEVEL_##v).sdk_level)
 
 /*
  * BPFFS (ie. /sys/fs/bpf) labelling is as follows:
@@ -318,17 +191,11 @@ static int (*bpf_sk_storage_delete_unsafe) (const struct bpf_map_def* sk_storage
     };
 
 // Type safe macro to declare a ring buffer and related output functions.
-// Compatibility:
-// * BPF ring buffers are only available kernels 5.8 and above. Any program
-//   accessing the ring buffer should set a program level min_kver >= 5.10,
-//   since 5.10 is the next LTS version.
-// * The definition below sets a map min_kver of 5.10 which requires targeting
-//   a BPFLOADER_MIN_VER >= BPFLOADER_S_VERSION.
 #define DEFINE_BPF_RINGBUF_EXT(the_map, ValueType, size_bytes, usr, grp, md,   \
                                selinux, pindir, share, min_loader, max_loader, \
                                ignore_eng, ignore_user, ignore_userdebug)      \
     DEFINE_BPF_MAP_BASE(the_map, RINGBUF, 0, 0, size_bytes, usr, grp, md,      \
-                        selinux, pindir, share, KVER_5_10, KVER_INF,           \
+                        selinux, pindir, share, KVER_NONE, KVER_INF,           \
                         min_loader, max_loader, ignore_eng, ignore_user,       \
                         ignore_userdebug, 0);                                  \
                                                                                \
@@ -359,14 +226,12 @@ static int (*bpf_sk_storage_delete_unsafe) (const struct bpf_map_def* sk_storage
                            LOAD_ON_ENG, LOAD_ON_USER, LOAD_ON_USERDEBUG)
 
 // Type safe macro to declare a sk storage and related accessor functions.
-// BPF_MAP_TYPE_SK_STORAGE was introduced in kernel 5.2 but this map requires BTF and
-// BTF is enabled on kernel 5.10 or higher.
 #define DEFINE_BPF_SK_STORAGE_EXT(the_map, ValueType, usr, grp, md, selinux, pindir,    \
                                   share, min_loader, max_loader, ignore_eng,            \
                                   ignore_user, ignore_userdebug, mapFlags)              \
     DEFINE_BPF_MAP_BASE(the_map, SK_STORAGE, sizeof(uint32_t), sizeof(ValueType),       \
                         0, usr, grp, md, selinux, pindir, share,                        \
-                        KVER_5_10, KVER_INF, min_loader, max_loader,                    \
+                        KVER_NONE, KVER_INF, min_loader, max_loader,                    \
                         ignore_eng, ignore_user, ignore_userdebug, mapFlags);           \
     BPF_ANNOTATE_KV_PAIR(the_map, uint32_t, ValueType);                                 \
                                                                                         \
